@@ -10,6 +10,73 @@
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+
+  <style>
+     body {
+  margin: 0;
+  font-family: "Poppins", sans-serif;
+  background: radial-gradient(circle at top, #021020, #000);
+  color: white;
+}
+
+header {
+  text-align: center;
+  padding: 20px;
+  background: rgba(0,255,255,0.1);
+  box-shadow: 0 0 20px rgba(0,255,255,0.3);
+}
+
+.logo { font-size: 2em; color: #00ffff; text-shadow: 0 0 10px cyan; }
+
+.container {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 30px;
+  margin: 40px auto;
+  max-width: 1200px;
+  flex-wrap: wrap;
+}
+
+.box {
+  flex: 1 1 500px;
+  background: rgba(255,255,255,0.05);
+  padding: 25px;
+  border-radius: 15px;
+  box-shadow: 0 0 20px rgba(0,255,255,0.2);
+  display: flex;
+  flex-direction: column;
+}
+
+.camera-box, .gesture-box { height: 100%; }
+
+#cameraFeed, #output {
+  width: 100%;
+  height: 400px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 3px solid #00ffff;
+  transform: scaleX(-1);
+}
+
+#cameraStatus { margin-top: 10px; color: #00ff99; font-weight: 600; }
+
+.gesture-box { text-align: left; justify-content: flex-start; }
+#gestureLabel { font-size: 1.6em; margin: 10px 0; text-shadow: 0 0 10px #00ffff; }
+#gestureLabel.normal { color: #00ff7f; }
+#gestureLabel.moderate { color: #ffff66; }
+#gestureLabel.emergency { color: #ff4d4d; }
+#gestureLabel.neutral { color: #cccccc; }
+
+.log-section { margin-top: 20px; flex: 1; }
+.log-list { max-height: 200px; overflow-y: auto; background: rgba(255,255,255,0.05); border-radius: 10px; padding: 10px; }
+
+@media (max-width: 768px) {
+  #cameraFeed, #output { height: 300px; }
+  .logo { font-size: 1.5em; }
+}
+
+</style>
 </head>
 <body>
   <header>
@@ -38,5 +105,127 @@
   </div>
 
   <script src="page3.js"></script>
+  <script>
+    
+  
+  const socket = io();
+
+const video = document.getElementById("cameraFeed");
+const canvas = document.getElementById("output");
+const ctx = canvas.getContext("2d");
+
+const gestureLabel = document.getElementById("gestureLabel");
+const alarm = document.getElementById("alarmSound");
+const cameraStatus = document.getElementById("cameraStatus");
+const gestureStatus = document.getElementById("gestureStatus");
+const logList = document.getElementById("logList");
+
+let detector, running = false, alarmOn = false, lastGesture = null;
+
+async function initCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+    video.srcObject = stream;
+    cameraStatus.textContent = "Camera: Connected";
+    cameraStatus.style.color = "#00ff99";
+    startDetector();
+  } catch (e) {
+    cameraStatus.textContent = "Camera: Denied";
+    cameraStatus.style.color = "#ff6666";
+    alert("Camera permission denied");
+  }
+}
+
+async function startDetector() {
+  const model = handPoseDetection.SupportedModels.MediaPipeHands;
+  const detectorConfig = {
+    runtime: "mediapipe",
+    solutionPath: "https://cdn.jsdelivr.net/npm/@mediapipe/hands",
+    modelType: "lite"
+  };
+  detector = await handPoseDetection.createDetector(model, detectorConfig);
+  running = true;
+  detectLoop();
+}
+
+async function detectLoop() {
+  if (!running) return;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const hands = await detector.estimateHands(video, { flipHorizontal: true });
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  let gesture = "No Hand";
+
+  if (hands.length > 0) {
+    for (const hand of hands) drawHand(hand.keypoints);
+    gesture = classifyGesture(hands[0].keypoints);
+  }
+
+  updateUI(gesture);
+  socket.emit("gesture_alert", { gesture: gesture });
+  requestAnimationFrame(detectLoop);
+}
+
+function drawHand(kp) {
+  ctx.strokeStyle = "#00ffff";
+  ctx.lineWidth = 2;
+  kp.forEach(pt => {
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 3, 0, 2 * Math.PI);
+    ctx.fillStyle = "#ff00ff";
+    ctx.fill();
+  });
+}
+
+function classifyGesture(kp) {
+  const tipIds = [8, 12, 16, 20];
+  let open = 0;
+  tipIds.forEach(id => { if (kp[id].y < kp[id - 2].y) open++; });
+  const thumbOpen = kp[4].x < kp[3].x;
+  if (open >= 4) return "Normal";
+  if (thumbOpen && open <= 1) return "Moderate";
+  if (open === 0) return "Emergency";
+  return "Moderate";
+}
+
+function updateUI(gesture) {
+  if (gesture === lastGesture) return;
+  lastGesture = gesture;
+  gestureStatus.textContent = gesture;
+  addToLog(gesture);
+
+  gestureLabel.className = gesture.toLowerCase();
+
+  switch (gesture) {
+    case "Normal": gestureLabel.textContent = "🖐 Normal – Palm Open"; stopAlarm(); break;
+    case "Moderate": gestureLabel.textContent = "👍 Moderate – Thumbs Up"; stopAlarm(); break;
+    case "Emergency": gestureLabel.textContent = "✊ EMERGENCY!"; triggerAlarm(); break;
+    default: gestureLabel.textContent = "No hand detected"; stopAlarm();
+  }
+}
+
+function addToLog(gesture) {
+  const time = new Date().toLocaleTimeString();
+  const entry = document.createElement("p");
+  let icon = "✋";
+  if (gesture === "Emergency") icon = "🚨";
+  else if (gesture === "Moderate") icon = "👍";
+  entry.textContent = `${icon} ${gesture} — ${time}`;
+  logList.prepend(entry);
+  if (logList.children.length > 15) logList.removeChild(logList.lastChild);
+}
+
+function triggerAlarm() {
+  if (!alarmOn) { alarm.play(); alarm.loop = true; alarmOn = true; }
+}
+
+function stopAlarm() {
+  if (alarmOn) { alarm.pause(); alarm.currentTime = 0; alarmOn = false; }
+}
+
+initCamera();
+
+    </script>
 </body>
 </html>
